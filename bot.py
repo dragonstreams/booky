@@ -632,7 +632,7 @@ class ConfirmSelectionView(discord.ui.View):
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
-            "Only the person who selected this audiobook can confirm it.",
+            "Only the person who selected this audiobook can use these controls.",
             ephemeral=True,
         )
         return False
@@ -662,6 +662,19 @@ class ConfirmSelectionView(discord.ui.View):
                 embed=None,
                 view=None,
             )
+
+    @discord.ui.button(
+        label="Other options",
+        style=discord.ButtonStyle.secondary,
+        emoji="↩️",
+    )
+    async def other_options(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(
+            content="Choose another audiobook from the original search results:",
+            embed=None,
+            view=BookSelectView(self.book_select.results),
+        )
 
 
 class BookSelectView(discord.ui.View):
