@@ -648,12 +648,42 @@ async def slash_request(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
     try:
         started = time.monotonic()
-        status, raw_results, _ = await api.get(
+        status, raw_results, response_text = await api.get(
             "/api/v1/book/lookup",
             params={"term": query},
         )
-        if status != 200 or not isinstance(raw_results, list) or not raw_results:
-            await interaction.followup.send("❌ No matching books found.")
+        elapsed = time.monotonic() - started
+        if status in (401, 403):
+            logger.error("Book lookup authorization failed with status %s in %.2fs", status, elapsed)
+            await interaction.followup.send(
+                "❌ Bookshelf rejected the API key. Check `BOOKSHELF_API_KEY` in the container settings."
+            )
+            return
+        if status != 200:
+            logger.error(
+                "Book lookup failed with status %s in %.2fs: %s",
+                status,
+                elapsed,
+                response_text[:300],
+            )
+            await interaction.followup.send(
+                f"❌ Bookshelf lookup failed with HTTP {status}. Check the container logs and `BOOKSHELF_URL`."
+            )
+            return
+        if not isinstance(raw_results, list):
+            logger.error(
+                "Book lookup returned %s instead of a list in %.2fs: %s",
+                type(raw_results).__name__,
+                elapsed,
+                response_text[:300],
+            )
+            await interaction.followup.send(
+                "❌ Bookshelf returned an unexpected lookup response. Check the container logs."
+            )
+            return
+        if not raw_results:
+            logger.info("Lookup for %r returned no metadata matches in %.2fs", query, elapsed)
+            await interaction.followup.send("❌ No matching books found in the Bookshelf metadata service.")
             return
 
         final_results = rank_and_limit_results(raw_results, query)
@@ -662,7 +692,7 @@ async def slash_request(interaction: discord.Interaction, query: str):
             query,
             len(raw_results),
             len(final_results),
-            time.monotonic() - started,
+            elapsed,
         )
         if not final_results:
             await interaction.followup.send("❌ No matching books found.")
