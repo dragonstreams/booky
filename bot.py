@@ -715,12 +715,37 @@ class BookshelfBot(commands.Bot):
 
 
 intents = discord.Intents.default()
-bot = BookshelfBot(command_prefix="!", intents=intents)
+bot = BookshelfBot(
+    command_prefix="!",
+    intents=intents,
+    status=discord.Status.online,
+    activity=discord.Activity(
+        type=discord.ActivityType.listening,
+        name="/request audiobook searches",
+    ),
+)
 
 
 @bot.event
 async def on_ready():
-    logger.info("Logged in as %s and synced slash commands", bot.user)
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Activity(
+            type=discord.ActivityType.listening,
+            name="/request audiobook searches",
+        ),
+    )
+    logger.info("Logged in as %s and presence set to online", bot.user)
+
+
+@bot.event
+async def on_disconnect():
+    logger.warning("Disconnected from the Discord gateway")
+
+
+@bot.event
+async def on_resumed():
+    logger.info("Discord gateway session resumed")
 
 
 @bot.tree.command(name="request", description="Search for an audiobook to add to Bookshelf")
