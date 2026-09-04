@@ -145,6 +145,48 @@ def get_author_name(book):
     return book.get("authorTitle") or author.get("authorName") or author.get("name") or "Unknown Author"
 
 
+def get_poster_url(book):
+    """Return the best public cover URL supplied by the metadata lookup."""
+    images = list(book.get("images") or [])
+    for edition in book.get("editions") or []:
+        images.extend(edition.get("images") or [])
+
+    images.sort(
+        key=lambda image: str(image.get("coverType") or "").casefold() not in ("cover", "poster")
+    )
+    for image in images:
+        for key in ("remoteUrl", "url"):
+            url = str(image.get(key) or "").strip()
+            if url.startswith(("https://", "http://")):
+                return url
+    return None
+
+
+def build_selection_embed(book):
+    title = book.get("title", "Unknown Book")
+    author_name = get_author_name(book)
+    year = str(book.get("publishDate") or "")[:4]
+    embed = discord.Embed(
+        title=title,
+        description=f"by **{author_name}**",
+        color=discord.Color.from_rgb(99, 102, 241),
+    )
+    if year:
+        embed.add_field(name="Published", value=year, inline=True)
+    embed.add_field(
+        name="Format",
+        value="🎧 Audiobook" if is_audio_edition(book) else "📖 Book",
+        inline=True,
+    )
+    poster_url = get_poster_url(book)
+    if poster_url:
+        embed.set_image(url=poster_url)
+    else:
+        embed.add_field(name="Cover", value="No cover image was provided.", inline=False)
+    embed.set_footer(text="Confirm below to add this title and search Prowlarr.")
+    return embed
+
+
 def audio_edition_score(book):
     """Prefer structured audio metadata over incidental description matches."""
     best_score = 0
@@ -405,21 +447,16 @@ class BookSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        try:
-            await self.handle_selection(interaction)
-        except BookshelfError as exc:
-            logger.exception("Bookshelf operation failed")
-            await interaction.edit_original_response(content=f"❌ {exc}", view=None)
-        except (KeyError, TypeError, ValueError):
-            logger.exception("Unexpected Bookshelf response while adding a book")
-            await interaction.edit_original_response(
-                content="❌ Bookshelf returned an unexpected response. Check the bot logs for details.",
-                view=None,
-            )
+        selected_index = int(self.values[0])
+        book = self.results[selected_index]
+        await interaction.response.edit_message(
+            content="Please review your selection before starting the search:",
+            embed=build_selection_embed(book),
+            view=ConfirmSelectionView(self, selected_index, interaction.user.id),
+        )
 
-    async def handle_selection(self, interaction):
-        book = copy.deepcopy(self.results[int(self.values[0])])
+    async def handle_selection(self, interaction, selected_index):
+        book = copy.deepcopy(self.results[selected_index])
         title = book.get("title", "Unknown Book")
         author_obj = book.get("author") or {}
         author_name = get_author_name(book)
@@ -580,6 +617,49 @@ class BookSelect(discord.ui.Select):
         else:
             await interaction.edit_original_response(
                 content=f"⚠️ Error: `{add_text[:250]}`",
+                view=None,
+            )
+
+
+class ConfirmSelectionView(discord.ui.View):
+    def __init__(self, book_select, selected_index, user_id):
+        super().__init__(timeout=120)
+        self.book_select = book_select
+        self.selected_index = selected_index
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who selected this audiobook can confirm it.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Confirm selection",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+    )
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.defer()
+        self.stop()
+        await interaction.edit_original_response(
+            content="⏳ Selection confirmed. Checking Bookshelf...",
+            embed=None,
+            view=None,
+        )
+        try:
+            await self.book_select.handle_selection(interaction, self.selected_index)
+        except BookshelfError as exc:
+            logger.exception("Bookshelf operation failed")
+            await interaction.edit_original_response(content=f"❌ {exc}", embed=None, view=None)
+        except (KeyError, TypeError, ValueError):
+            logger.exception("Unexpected Bookshelf response while adding a book")
+            await interaction.edit_original_response(
+                content="❌ Bookshelf returned an unexpected response. Check the bot logs for details.",
+                embed=None,
                 view=None,
             )
 
