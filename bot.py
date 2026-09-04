@@ -9,6 +9,7 @@ import uuid
 
 import aiohttp
 import discord
+from aiohttp import web
 from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
@@ -19,6 +20,11 @@ BOOKSHELF_URL = (os.getenv("BOOKSHELF_URL") or "http://bookshelf:8787").strip().
 API_KEY = os.getenv("BOOKSHELF_API_KEY")
 if API_KEY:
     API_KEY = API_KEY.strip().strip("'").strip('"')
+
+try:
+    HEALTH_PORT = int(os.getenv("PORT", "8080"))
+except ValueError as exc:
+    raise RuntimeError("PORT must be a valid integer") from exc
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("booky")
@@ -584,13 +590,47 @@ class BookSelectView(discord.ui.View):
         self.add_item(BookSelect(results))
 
 
+async def health_check(_request):
+    return web.json_response({"status": "ok"})
+
+
+async def readiness_check(request):
+    active_bot = request.app["bot"]
+    if active_bot.is_ready():
+        return web.json_response({"status": "ready"})
+    return web.json_response({"status": "starting"}, status=503)
+
+
+async def start_health_server(active_bot):
+    app = web.Application()
+    app["bot"] = active_bot
+    app.add_routes(
+        [
+            web.get("/healthz", health_check),
+            web.get("/readyz", readiness_check),
+        ]
+    )
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", HEALTH_PORT).start()
+    logger.info("Health server listening on port %s", HEALTH_PORT)
+    return runner
+
+
 class BookshelfBot(commands.Bot):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.health_runner = None
+
     async def setup_hook(self):
+        self.health_runner = await start_health_server(self)
         await api.start()
         await self.tree.sync()
 
     async def close(self):
         await api.close()
+        if self.health_runner:
+            await self.health_runner.cleanup()
         await super().close()
 
 
