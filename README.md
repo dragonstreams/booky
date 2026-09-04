@@ -13,7 +13,25 @@ The included `Dockerfile` creates a production Python 3.12 image that:
 - exposes an HTTP health service on `PORT` (default `8080`);
 - includes an image-level health check at `/healthz`.
 
-Build and publish the image for the `linux/amd64` platform, which is required by Bunny Magic Containers. Do not include credentials in the image; configure them as container environment variables.
+The GitHub Actions workflow at `.github/workflows/publish-container.yml` automatically builds and publishes a Bunny-compatible `linux/amd64` image to GitHub Container Registry whenever the container files change. It also supports manual runs from the repository's **Actions** tab.
+
+The published image reference is:
+
+```text
+ghcr.io/<github-owner>/<repository>:latest
+```
+
+The `latest` tag is published from the repository's default branch. Branch and commit-specific tags are also retained. Do not include credentials in the image; configure them as container environment variables.
+
+### Make the GHCR package visible to Bunny
+
+After the first successful **Publish Booky2.0 container** workflow run:
+
+1. Open the repository or organization **Packages** page on GitHub.
+2. Select the newly created container package.
+3. Open **Package settings** and change visibility to **Public** for the simplest Bunny setup.
+4. If the package must remain private, connect GHCR under Bunny **Magic Containers → Image Registries** using GitHub credentials with package-read access.
+5. In Bunny, select or enter `ghcr.io/<github-owner>/<repository>:latest` and refresh the image list.
 
 ## Required environment variables
 
@@ -29,8 +47,8 @@ The old default `http://bookshelf:8787` works only when that hostname is resolva
 
 ## Bunny Magic Containers setup
 
-1. Publish the image to a registry supported by Magic Containers, targeting `linux/amd64`.
-2. Create a Magic Container from that image.
+1. Confirm the GitHub publishing workflow completed successfully and the GHCR package is public or connected to Bunny.
+2. Create a Magic Container from `ghcr.io/<github-owner>/<repository>:latest`.
 3. Configure container port `8080`, or use the same custom value for both `PORT` and the port settings below.
 4. Add the required environment variables under **Container Settings → Edit → Environment Variables**.
 5. Keep the service at exactly **one replica**. Multiple replicas using the same Discord token can process the same bot workload and should not be used for autoscaling.
