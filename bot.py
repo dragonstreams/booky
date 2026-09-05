@@ -28,8 +28,12 @@ JACKETT_API_KEY = (os.getenv("JACKETT_API_KEY") or "").strip().strip("'").strip(
 
 try:
     HEALTH_PORT = int(os.getenv("PORT", "8080"))
+    DOWNLOAD_POLL_SECONDS = max(10, int(os.getenv("DOWNLOAD_POLL_SECONDS", "30")))
+    DOWNLOAD_WATCH_SECONDS = max(300, int(os.getenv("DOWNLOAD_WATCH_SECONDS", "86400")))
 except ValueError as exc:
-    raise RuntimeError("PORT must be a valid integer") from exc
+    raise RuntimeError(
+        "PORT, DOWNLOAD_POLL_SECONDS, and DOWNLOAD_WATCH_SECONDS must be valid integers"
+    ) from exc
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("booky")
@@ -231,6 +235,7 @@ _profile_cache = {"value": None, "expires": 0.0}
 _library_cache = {"value": None, "expires": 0.0}
 _profile_lock = asyncio.Lock()
 _library_lock = asyncio.Lock()
+_download_watch_tasks = set()
 
 
 def normalize(value):
@@ -502,6 +507,76 @@ def format_jackett_results(results):
     return content if added else None
 
 
+def book_has_file(book):
+    statistics = book.get("statistics") or {}
+    return (
+        book.get("hasFile") is True
+        or bool(book.get("bookFileId"))
+        or statistics.get("bookFileCount", 0) > 0
+        or statistics.get("sizeOnDisk", 0) > 0
+    )
+
+
+async def monitor_download(book_id, channel_id, requester_id, title, author_name):
+    deadline = time.monotonic() + DOWNLOAD_WATCH_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            status, book, _ = await api.get(f"/api/v1/book/{book_id}")
+            if status == 200 and isinstance(book, dict) and book_has_file(book):
+                channel = bot.get_channel(channel_id)
+                if channel is None:
+                    channel = await bot.fetch_channel(channel_id)
+
+                safe_title = discord.utils.escape_markdown(
+                    discord.utils.escape_mentions(str(title))
+                )
+                safe_author = discord.utils.escape_markdown(
+                    discord.utils.escape_mentions(str(author_name))
+                )
+                await channel.send(
+                    f"✅ <@{requester_id}> **{safe_title}** by *{safe_author}* "
+                    "has finished downloading and is now available for playback.",
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[discord.Object(id=requester_id)],
+                        roles=False,
+                        everyone=False,
+                        replied_user=False,
+                    ),
+                )
+                logger.info("Download completed for book %s; Discord user %s notified", book_id, requester_id)
+                return
+            if status == 404:
+                logger.warning("Stopped monitoring removed Bookshelf book %s", book_id)
+                return
+        except BookshelfError:
+            logger.exception("Bookshelf check failed while monitoring book %s", book_id)
+        except discord.DiscordException:
+            logger.exception("Could not notify Discord channel %s for book %s", channel_id, book_id)
+            return
+
+        await asyncio.sleep(DOWNLOAD_POLL_SECONDS)
+
+    logger.warning("Download monitoring timed out for book %s", book_id)
+
+
+def schedule_download_monitor(interaction, book_id, title, author_name):
+    if not interaction.channel_id or not book_id:
+        logger.warning("Cannot monitor book %s because the Discord channel is unavailable", book_id)
+        return
+
+    task = asyncio.create_task(
+        monitor_download(
+            book_id,
+            interaction.channel_id,
+            interaction.user.id,
+            title,
+            author_name,
+        )
+    )
+    _download_watch_tasks.add(task)
+    task.add_done_callback(_download_watch_tasks.discard)
+
+
 async def track_search_and_notify(interaction, book_id, title, author_name):
     """Trigger BookSearch and use targeted, bounded polling to detect a new grab."""
     previous_grab_ids = await get_recent_grab_ids(book_id)
@@ -538,8 +613,10 @@ async def track_search_and_notify(interaction, book_id, title, author_name):
     if grabbed:
         content = (
             f"✅ Added **{title}** by *{author_name}* to Bookshelf!\n"
-            "🟢 **Download Found:** Prowlarr matched a release and sent it to your download client."
+            "🟢 **Download Found:** Prowlarr matched a release and sent it to your download client.\n"
+            "🔔 I’ll notify you here when it is available for playback."
         )
+        schedule_download_monitor(interaction, book_id, title, author_name)
     else:
         jackett_results = await jackett.search(f"{title} {author_name} audiobook")
         content = format_jackett_results(jackett_results) or "No Results Found"
@@ -846,6 +923,10 @@ class BookshelfBot(commands.Bot):
         await self.tree.sync()
 
     async def close(self):
+        for task in tuple(_download_watch_tasks):
+            task.cancel()
+        if _download_watch_tasks:
+            await asyncio.gather(*_download_watch_tasks, return_exceptions=True)
         await api.close()
         await jackett.close()
         if self.health_runner:
