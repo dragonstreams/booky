@@ -242,6 +242,13 @@ def normalize(value):
     return " ".join(re.sub(r"[^\w]+", " ", str(value or "").casefold()).split())
 
 
+def no_results_message(title):
+    safe_title = discord.utils.escape_markdown(
+        discord.utils.escape_mentions(str(title or "Unknown Title")[:200])
+    )
+    return f"No Results Found for **{safe_title}**."
+
+
 def sanitize(obj):
     """Replace null collection fields with empty lists for Readarr schema validation."""
     if not isinstance(obj, dict):
@@ -619,7 +626,7 @@ async def track_search_and_notify(interaction, book_id, title, author_name):
         schedule_download_monitor(interaction, book_id, title, author_name)
     else:
         jackett_results = await jackett.search(f"{title} {author_name} audiobook")
-        content = format_jackett_results(jackett_results) or "No Results Found"
+        content = format_jackett_results(jackett_results) or no_results_message(title)
     await interaction.edit_original_response(content=content)
 
 
@@ -991,7 +998,7 @@ async def slash_request(interaction: discord.Interaction, query: str):
                 elapsed,
                 response_text[:300],
             )
-            await interaction.followup.send("No Results Found")
+            await interaction.followup.send(no_results_message(query))
             return
         if status != 200:
             logger.error(
@@ -1017,7 +1024,7 @@ async def slash_request(interaction: discord.Interaction, query: str):
             return
         if not raw_results:
             logger.info("Lookup for %r returned no metadata matches in %.2fs", query, elapsed)
-            await interaction.followup.send("No Results Found")
+            await interaction.followup.send(no_results_message(query))
             return
 
         final_results = rank_and_limit_results(raw_results, query)
@@ -1029,7 +1036,7 @@ async def slash_request(interaction: discord.Interaction, query: str):
             elapsed,
         )
         if not final_results:
-            await interaction.followup.send("No Results Found")
+            await interaction.followup.send(no_results_message(query))
             return
 
         await interaction.followup.send(
