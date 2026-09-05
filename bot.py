@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlsplit
 import aiohttp
 import discord
 from aiohttp import web
+from discord import app_commands
 from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
@@ -242,10 +243,16 @@ def normalize(value):
     return " ".join(re.sub(r"[^\w]+", " ", str(value or "").casefold()).split())
 
 
-def no_results_message(title):
-    safe_title = discord.utils.escape_markdown(
-        discord.utils.escape_mentions(str(title or "Unknown Title")[:200])
+def safe_discord_text(value, limit=200):
+    return discord.utils.escape_markdown(
+        discord.utils.escape_mentions(str(value or "")[:limit])
     )
+
+
+def no_results_message(title, author_name=None):
+    safe_title = safe_discord_text(title or "Unknown Title")
+    if author_name:
+        return f"No Results Found for **{safe_title}** by **{safe_discord_text(author_name)}**."
     return f"No Results Found for **{safe_title}**."
 
 
@@ -329,9 +336,10 @@ def is_audio_edition(book):
     return audio_edition_score(book) > 0
 
 
-def rank_and_limit_results(results, query, limit=25):
+def rank_and_limit_results(results, title_query, author_query="", limit=25):
     """Deduplicate results and rank title/author relevance before Discord's 25-option limit."""
-    normalized_query = normalize(query)
+    normalized_title_query = normalize(title_query)
+    normalized_author_query = normalize(author_query)
     ranked = []
     seen = set()
 
@@ -354,14 +362,17 @@ def rank_and_limit_results(results, query, limit=25):
         normalized_author = normalize(author_name)
         audio_score = audio_edition_score(book)
         score = audio_score * 10
-        if normalized_title == normalized_query:
+        if normalized_title == normalized_title_query:
             score += 100
-        elif normalized_title.startswith(normalized_query):
+        elif normalized_title.startswith(normalized_title_query):
             score += 60
-        elif normalized_query and normalized_query in normalized_title:
+        elif normalized_title_query and normalized_title_query in normalized_title:
             score += 35
-        if normalized_query and normalized_query in normalized_author:
-            score += 20
+        if normalized_author_query:
+            if normalized_author == normalized_author_query:
+                score += 80
+            elif normalized_author_query in normalized_author or normalized_author in normalized_author_query:
+                score += 45
         ranked.append((score, -position, audio_score, book))
 
     audio_results = [item for item in ranked if item[2] > 0]
@@ -976,13 +987,17 @@ async def on_resumed():
 
 
 @bot.tree.command(name="request", description="Search for an audiobook to add to Bookshelf")
-async def slash_request(interaction: discord.Interaction, query: str):
+@app_commands.describe(
+    title="Audiobook title",
+    author="Author name",
+)
+async def slash_request(interaction: discord.Interaction, title: str, author: str):
     await interaction.response.defer()
     try:
         started = time.monotonic()
         status, raw_results, response_text = await api.get(
             "/api/v1/book/lookup",
-            params={"term": query},
+            params={"term": title},
         )
         elapsed = time.monotonic() - started
         if status in (401, 403):
@@ -993,12 +1008,13 @@ async def slash_request(interaction: discord.Interaction, query: str):
             return
         if status == 503:
             logger.warning(
-                "Book lookup returned 503 for %r in %.2fs: %s",
-                query,
+                "Book lookup returned 503 for %r by %r in %.2fs: %s",
+                title,
+                author,
                 elapsed,
                 response_text[:300],
             )
-            await interaction.followup.send(no_results_message(query))
+            await interaction.followup.send(no_results_message(title, author))
             return
         if status != 200:
             logger.error(
@@ -1023,24 +1039,26 @@ async def slash_request(interaction: discord.Interaction, query: str):
             )
             return
         if not raw_results:
-            logger.info("Lookup for %r returned no metadata matches in %.2fs", query, elapsed)
-            await interaction.followup.send(no_results_message(query))
+            logger.info("Lookup for %r by %r returned no metadata matches in %.2fs", title, author, elapsed)
+            await interaction.followup.send(no_results_message(title, author))
             return
 
-        final_results = rank_and_limit_results(raw_results, query)
+        final_results = rank_and_limit_results(raw_results, title, author)
         logger.info(
-            "Lookup for %r returned %d raw and %d displayed results in %.2fs",
-            query,
+            "Lookup for %r by %r returned %d raw and %d displayed results in %.2fs",
+            title,
+            author,
             len(raw_results),
             len(final_results),
             elapsed,
         )
         if not final_results:
-            await interaction.followup.send(no_results_message(query))
+            await interaction.followup.send(no_results_message(title, author))
             return
 
         await interaction.followup.send(
-            f"🎧 Found {len(final_results)} match(es) for `{query}`. Select below:",
+            f"🎧 Found {len(final_results)} match(es) for "
+            f"**{safe_discord_text(title)}** by **{safe_discord_text(author)}**. Select below:",
             view=BookSelectView(final_results),
         )
     except BookshelfError:
