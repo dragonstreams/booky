@@ -774,6 +774,15 @@ async def slash_request(interaction: discord.Interaction, query: str):
                 "❌ Bookshelf rejected the API key. Check `BOOKSHELF_API_KEY` in the container settings."
             )
             return
+        if status == 503:
+            logger.warning(
+                "Book lookup returned 503 for %r in %.2fs: %s",
+                query,
+                elapsed,
+                response_text[:300],
+            )
+            await interaction.followup.send("No Results Found")
+            return
         if status != 200:
             logger.error(
                 "Book lookup failed with status %s in %.2fs: %s",
