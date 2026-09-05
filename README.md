@@ -40,10 +40,14 @@ After the first successful **Publish Booky2.0 container** workflow run:
 | `DISCORD_TOKEN` | Yes | Discord bot token. `DISCORD_BOT_TOKEN` is also accepted for compatibility. |
 | `BOOKSHELF_URL` | Yes | Base URL Bunny can use to reach Bookshelf, without a trailing slash. |
 | `BOOKSHELF_API_KEY` | Yes | Bookshelf/Readarr API key. Store it as a secret. |
+| `JACKETT_URL` | For fallback | Base URL Bunny can use to reach Jackett, without a trailing slash. |
+| `JACKETT_API_KEY` | For fallback | Jackett API key. Store it as a secret. |
 | `PORT` | No | Health server port. Defaults to `8080`. |
 | `LOG_LEVEL` | No | Python log level. Defaults to `INFO`. |
 
 The old default `http://bookshelf:8787` works only when that hostname is resolvable from the container. For a Bunny-hosted bot, set `BOOKSHELF_URL` to an address reachable from the Magic Containers network.
+
+When both Jackett variables are configured, Booky2.0 searches Jackett's enabled indexers after Prowlarr finds no download. It shows up to five safe release links in Discord but does not automatically download them. Links containing API keys, passkeys, or authentication tokens are omitted. If Jackett runs only on a home network, Bunny cannot reach it unless you expose it through a secure authenticated tunnel or private network; do not expose an unauthenticated Jackett instance directly to the internet.
 
 ## Bunny Magic Containers setup
 

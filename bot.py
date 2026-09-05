@@ -6,6 +6,8 @@ import os
 import re
 import time
 import uuid
+import xml.etree.ElementTree as ET
+from urllib.parse import parse_qsl, urlsplit
 
 import aiohttp
 import discord
@@ -20,6 +22,9 @@ BOOKSHELF_URL = (os.getenv("BOOKSHELF_URL") or "http://bookshelf:8787").strip().
 API_KEY = os.getenv("BOOKSHELF_API_KEY")
 if API_KEY:
     API_KEY = API_KEY.strip().strip("'").strip('"')
+
+JACKETT_URL = (os.getenv("JACKETT_URL") or "").strip().strip("'").strip('"').rstrip("/")
+JACKETT_API_KEY = (os.getenv("JACKETT_API_KEY") or "").strip().strip("'").strip('"')
 
 try:
     HEALTH_PORT = int(os.getenv("PORT", "8080"))
@@ -118,7 +123,110 @@ class BookshelfClient:
         return await self.request("PUT", path, payload=payload)
 
 
+class JackettClient:
+    """Optional Torznab client used only when Bookshelf/Prowlarr finds no release."""
+
+    def __init__(self):
+        self.session = None
+
+    @property
+    def configured(self):
+        return bool(JACKETT_URL and JACKETT_API_KEY)
+
+    async def start(self):
+        if not self.configured or (self.session and not self.session.closed):
+            return
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=45, connect=5, sock_read=40),
+            connector=aiohttp.TCPConnector(limit=5, ttl_dns_cache=300),
+        )
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+    async def search(self, query, limit=5):
+        if not self.configured:
+            logger.warning("Jackett fallback is not configured")
+            return []
+
+        await self.start()
+        endpoint = f"{JACKETT_URL}/api/v2.0/indexers/all/results/torznab/api"
+        try:
+            async with self.session.get(
+                endpoint,
+                params={"apikey": JACKETT_API_KEY, "t": "search", "q": query},
+            ) as response:
+                body = await response.text()
+                if response.status != 200:
+                    logger.error("Jackett search returned HTTP %s: %s", response.status, body[:300])
+                    return []
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            logger.exception("Jackett fallback search failed")
+            return []
+
+        try:
+            root = ET.fromstring(body)
+        except ET.ParseError:
+            logger.exception("Jackett returned invalid Torznab XML")
+            return []
+
+        results = []
+        for item in (node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "item"):
+            title = self._child_text(item, "title")
+            attributes = {
+                node.get("name", "").casefold(): node.get("value", "")
+                for node in item.iter()
+                if node.tag.rsplit("}", 1)[-1] == "attr"
+            }
+            link = self._safe_link(
+                attributes.get("magneturl"),
+                self._child_text(item, "comments"),
+                self._child_text(item, "guid"),
+                self._child_text(item, "link"),
+            )
+            if title and link:
+                results.append(
+                    {
+                        "title": title,
+                        "link": link,
+                        "seeders": attributes.get("seeders"),
+                        "indexer": attributes.get("indexer"),
+                    }
+                )
+            if len(results) >= limit:
+                break
+        return results
+
+    @staticmethod
+    def _child_text(item, name):
+        for child in item:
+            if child.tag.rsplit("}", 1)[-1] == name and child.text:
+                return child.text.strip()
+        return ""
+
+    @staticmethod
+    def _safe_link(*candidates):
+        sensitive_terms = ("apikey", "api_key", "passkey", "authkey", "token=")
+        for candidate in candidates:
+            link = str(candidate or "").strip()
+            if not link or JACKETT_API_KEY in link or any(char in link for char in "<>\r\n"):
+                continue
+            lowered = link.casefold()
+            if any(term in lowered for term in sensitive_terms):
+                continue
+            parsed = urlsplit(link)
+            if parsed.scheme == "magnet":
+                return link
+            if parsed.scheme in ("http", "https") and parsed.netloc:
+                query_keys = {key.casefold() for key, _ in parse_qsl(parsed.query)}
+                if not query_keys.intersection({"apikey", "api_key", "passkey", "authkey", "token"}):
+                    return link
+        return ""
+
+
 api = BookshelfClient()
+jackett = JackettClient()
 _profile_cache = {"value": None, "expires": 0.0}
 _library_cache = {"value": None, "expires": 0.0}
 _profile_lock = asyncio.Lock()
@@ -375,6 +483,25 @@ async def get_recent_grab_ids(book_id):
     }
 
 
+def format_jackett_results(results):
+    content = "🔎 Prowlarr found no releases. Jackett found these possible matches:\n"
+    added = 0
+    for result in results:
+        title = discord.utils.escape_markdown(result["title"][:120])
+        details = []
+        if result.get("indexer"):
+            details.append(discord.utils.escape_markdown(str(result["indexer"])[:40]))
+        if result.get("seeders"):
+            details.append(f"{result['seeders']} seeders")
+        suffix = f" — {' · '.join(details)}" if details else ""
+        entry = f"\n• **{title}**{suffix}\n  <{result['link']}>"
+        if len(content) + len(entry) > 1900:
+            break
+        content += entry
+        added += 1
+    return content if added else None
+
+
 async def track_search_and_notify(interaction, book_id, title, author_name):
     """Trigger BookSearch and use targeted, bounded polling to detect a new grab."""
     previous_grab_ids = await get_recent_grab_ids(book_id)
@@ -414,7 +541,8 @@ async def track_search_and_notify(interaction, book_id, title, author_name):
             "🟢 **Download Found:** Prowlarr matched a release and sent it to your download client."
         )
     else:
-        content = "No Results Found"
+        jackett_results = await jackett.search(f"{title} {author_name} audiobook")
+        content = format_jackett_results(jackett_results) or "No Results Found"
     await interaction.edit_original_response(content=content)
 
 
@@ -719,6 +847,7 @@ class BookshelfBot(commands.Bot):
 
     async def close(self):
         await api.close()
+        await jackett.close()
         if self.health_runner:
             await self.health_runner.cleanup()
         await super().close()
