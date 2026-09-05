@@ -414,10 +414,7 @@ async def track_search_and_notify(interaction, book_id, title, author_name):
             "🟢 **Download Found:** Prowlarr matched a release and sent it to your download client."
         )
     else:
-        content = (
-            f"⚠️ Added **{title}** by *{author_name}* to Bookshelf, but "
-            "**no active download source** was found on Prowlarr/indexers right now."
-        )
+        content = "No Results Found"
     await interaction.edit_original_response(content=content)
 
 
@@ -801,7 +798,7 @@ async def slash_request(interaction: discord.Interaction, query: str):
             return
         if not raw_results:
             logger.info("Lookup for %r returned no metadata matches in %.2fs", query, elapsed)
-            await interaction.followup.send("❌ No matching books found in the Bookshelf metadata service.")
+            await interaction.followup.send("No Results Found")
             return
 
         final_results = rank_and_limit_results(raw_results, query)
@@ -813,7 +810,7 @@ async def slash_request(interaction: discord.Interaction, query: str):
             elapsed,
         )
         if not final_results:
-            await interaction.followup.send("❌ No matching books found.")
+            await interaction.followup.send("No Results Found")
             return
 
         await interaction.followup.send(
