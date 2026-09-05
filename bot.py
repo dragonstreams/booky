@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlsplit
 import aiohttp
 import discord
 from aiohttp import web
+from discord import app_commands
 from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
@@ -329,9 +330,10 @@ def is_audio_edition(book):
     return audio_edition_score(book) > 0
 
 
-def rank_and_limit_results(results, query, limit=25):
-    """Deduplicate results and rank title/author relevance before Discord's 25-option limit."""
-    normalized_query = normalize(query)
+def rank_and_limit_results(results, title_query="", author_query="", limit=25):
+    """Deduplicate results and rank title and author relevance before Discord's limit."""
+    normalized_title_query = normalize(title_query)
+    normalized_author_query = normalize(author_query)
     ranked = []
     seen = set()
 
@@ -354,14 +356,33 @@ def rank_and_limit_results(results, query, limit=25):
         normalized_author = normalize(author_name)
         audio_score = audio_edition_score(book)
         score = audio_score * 10
-        if normalized_title == normalized_query:
-            score += 100
-        elif normalized_title.startswith(normalized_query):
-            score += 60
-        elif normalized_query and normalized_query in normalized_title:
-            score += 35
-        if normalized_query and normalized_query in normalized_author:
-            score += 20
+
+        title_matches = False
+        if normalized_title_query:
+            if normalized_title == normalized_title_query:
+                score += 100
+                title_matches = True
+            elif normalized_title.startswith(normalized_title_query):
+                score += 60
+                title_matches = True
+            elif normalized_title_query in normalized_title:
+                score += 35
+                title_matches = True
+
+        author_matches = False
+        if normalized_author_query:
+            if normalized_author == normalized_author_query:
+                score += 80
+                author_matches = True
+            elif normalized_author.startswith(normalized_author_query):
+                score += 45
+                author_matches = True
+            elif normalized_author_query in normalized_author:
+                score += 25
+                author_matches = True
+
+        if normalized_title_query and normalized_author_query and title_matches and author_matches:
+            score += 50
         ranked.append((score, -position, audio_score, book))
 
     audio_results = [item for item in ranked if item[2] > 0]
@@ -975,72 +996,120 @@ async def on_resumed():
     logger.info("Discord gateway session resumed")
 
 
-@bot.tree.command(name="request", description="Search for an audiobook to add to Bookshelf")
-async def slash_request(interaction: discord.Interaction, query: str):
+@bot.tree.command(name="request", description="Search for an audiobook by title, author, or both")
+@app_commands.describe(
+    title="Audiobook title (optional when author is provided)",
+    author="Author name (optional when title is provided)",
+)
+async def slash_request(
+    interaction: discord.Interaction,
+    title: str | None = None,
+    author: str | None = None,
+):
+    title = (title or "").strip()
+    author = (author or "").strip()
+    if not title and not author:
+        await interaction.response.send_message(
+            "Please enter a title, an author, or both.",
+            ephemeral=True,
+        )
+        return
+
     await interaction.response.defer()
+    search_label = f"{title} by {author}" if title and author else title or f"Author: {author}"
+    search_terms = []
+    if title and author:
+        search_terms.append(f"{title} {author}")
+    if title:
+        search_terms.append(title)
+    if author:
+        search_terms.append(author)
+    search_terms = list(dict.fromkeys(search_terms))
+
     try:
         started = time.monotonic()
-        status, raw_results, response_text = await api.get(
-            "/api/v1/book/lookup",
-            params={"term": query},
+        responses = await asyncio.gather(
+            *(
+                api.get("/api/v1/book/lookup", params={"term": term})
+                for term in search_terms
+            )
         )
         elapsed = time.monotonic() - started
-        if status in (401, 403):
-            logger.error("Book lookup authorization failed with status %s in %.2fs", status, elapsed)
-            await interaction.followup.send(
-                "❌ Bookshelf rejected the API key. Check `BOOKSHELF_API_KEY` in the container settings."
-            )
-            return
-        if status == 503:
-            logger.warning(
-                "Book lookup returned 503 for %r in %.2fs: %s",
-                query,
-                elapsed,
-                response_text[:300],
-            )
-            await interaction.followup.send(no_results_message(query))
-            return
-        if status != 200:
-            logger.error(
-                "Book lookup failed with status %s in %.2fs: %s",
-                status,
-                elapsed,
-                response_text[:300],
-            )
-            await interaction.followup.send(
-                f"❌ Bookshelf lookup failed with HTTP {status}. Check the container logs and `BOOKSHELF_URL`."
-            )
-            return
-        if not isinstance(raw_results, list):
-            logger.error(
-                "Book lookup returned %s instead of a list in %.2fs: %s",
-                type(raw_results).__name__,
-                elapsed,
-                response_text[:300],
-            )
-            await interaction.followup.send(
-                "❌ Bookshelf returned an unexpected lookup response. Check the container logs."
-            )
-            return
+        raw_results = []
+        valid_response_seen = False
+        unexpected_response = False
+        first_http_error = None
+
+        for term, (status, results, response_text) in zip(search_terms, responses):
+            if status in (401, 403):
+                logger.error("Book lookup authorization failed with status %s in %.2fs", status, elapsed)
+                await interaction.followup.send(
+                    "❌ Bookshelf rejected the API key. Check `BOOKSHELF_API_KEY` in the container settings."
+                )
+                return
+            if status == 503:
+                logger.warning(
+                    "Book lookup returned 503 for %r in %.2fs: %s",
+                    term,
+                    elapsed,
+                    response_text[:300],
+                )
+                continue
+            if status != 200:
+                logger.error(
+                    "Book lookup for %r failed with status %s in %.2fs: %s",
+                    term,
+                    status,
+                    elapsed,
+                    response_text[:300],
+                )
+                first_http_error = first_http_error or status
+                continue
+            if not isinstance(results, list):
+                logger.error(
+                    "Book lookup for %r returned %s instead of a list: %s",
+                    term,
+                    type(results).__name__,
+                    response_text[:300],
+                )
+                unexpected_response = True
+                continue
+
+            valid_response_seen = True
+            raw_results.extend(results)
+
         if not raw_results:
-            logger.info("Lookup for %r returned no metadata matches in %.2fs", query, elapsed)
-            await interaction.followup.send(no_results_message(query))
+            if valid_response_seen or (not first_http_error and not unexpected_response):
+                logger.info("Lookup for %r returned no metadata matches in %.2fs", search_label, elapsed)
+                await interaction.followup.send(no_results_message(search_label))
+            elif unexpected_response:
+                await interaction.followup.send(
+                    "❌ Bookshelf returned an unexpected lookup response. Check the container logs."
+                )
+            else:
+                await interaction.followup.send(
+                    f"❌ Bookshelf lookup failed with HTTP {first_http_error}. "
+                    "Check the container logs and `BOOKSHELF_URL`."
+                )
             return
 
-        final_results = rank_and_limit_results(raw_results, query)
+        final_results = rank_and_limit_results(raw_results, title, author)
         logger.info(
             "Lookup for %r returned %d raw and %d displayed results in %.2fs",
-            query,
+            search_label,
             len(raw_results),
             len(final_results),
             elapsed,
         )
         if not final_results:
-            await interaction.followup.send(no_results_message(query))
+            await interaction.followup.send(no_results_message(search_label))
             return
 
+        safe_search_label = discord.utils.escape_markdown(
+            discord.utils.escape_mentions(search_label[:200])
+        )
         await interaction.followup.send(
-            f"🎧 Found {len(final_results)} match(es) for `{query}`. Select below:",
+            f"🎧 Found {len(final_results)} match(es) for **{safe_search_label}**. Select below:",
             view=BookSelectView(final_results),
         )
     except BookshelfError:

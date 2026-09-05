@@ -80,3 +80,10 @@ The health service exposes no credentials or Bookshelf data.
 ## Discord configuration
 
 The Discord application must have a bot user installed in the target server with permission to use application commands. Booky2.0 synchronizes its `/request` command during startup.
+
+The `/request` command accepts two optional fields:
+
+- `title` — search by audiobook title;
+- `author` — search by author name.
+
+Users can provide either field or both. When both are supplied, Booky2.0 searches the combined phrase and each individual field, merges duplicate results, and ranks books that match both values first.
