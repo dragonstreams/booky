@@ -40,6 +40,7 @@ After the first successful **Publish Booky2.0 container** workflow run:
 | `DISCORD_TOKEN` | Yes | Discord bot token. `DISCORD_BOT_TOKEN` is also accepted for compatibility. |
 | `BOOKSHELF_URL` | Yes | Base URL Bunny can use to reach Bookshelf, without a trailing slash. |
 | `BOOKSHELF_API_KEY` | Yes | Bookshelf/Readarr API key. Store it as a secret. |
+| `ABS_REPORT_CHANNEL_ID` | For `/absreport` | Discord channel ID that receives public audiobook issue reports. |
 | `JACKETT_URL` | For fallback | Base URL Bunny can use to reach Jackett, without a trailing slash. |
 | `JACKETT_API_KEY` | For fallback | Jackett API key. Store it as a secret. |
 | `DOWNLOAD_POLL_SECONDS` | No | Seconds between completion checks. Defaults to `30`, minimum `10`. |
@@ -79,7 +80,7 @@ The health service exposes no credentials or Bookshelf data.
 
 ## Discord configuration
 
-The Discord application must have a bot user installed in the target server with permission to use application commands. Booky2.0 synchronizes its `/request` command during startup.
+The Discord application must have a bot user installed in the target server with permission to use application commands. Booky2.0 synchronizes its slash commands during startup.
 
 The `/request` command accepts two optional fields:
 
@@ -87,3 +88,5 @@ The `/request` command accepts two optional fields:
 - `author` — search by author name.
 
 Users can provide either field or both. When both are supplied, Booky2.0 searches the combined phrase and each individual field, merges duplicate results, and ranks books that match both values first.
+
+The `/absreport` command opens a private form with Audiobook Title, Audiobook Author, and Issue fields. The Issue field accepts up to 1,000 characters. Submitted reports are posted publicly in `ABS_REPORT_CHANNEL_ID`, while the submitter receives a private confirmation. Enable Discord Developer Mode to copy the destination channel ID, and give the bot View Channel, Send Messages, and Embed Links permissions there.

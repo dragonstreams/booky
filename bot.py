@@ -26,14 +26,17 @@ if API_KEY:
 
 JACKETT_URL = (os.getenv("JACKETT_URL") or "").strip().strip("'").strip('"').rstrip("/")
 JACKETT_API_KEY = (os.getenv("JACKETT_API_KEY") or "").strip().strip("'").strip('"')
+ABS_REPORT_CHANNEL_ID_VALUE = (os.getenv("ABS_REPORT_CHANNEL_ID") or "").strip()
 
 try:
     HEALTH_PORT = int(os.getenv("PORT", "8080"))
     DOWNLOAD_POLL_SECONDS = max(10, int(os.getenv("DOWNLOAD_POLL_SECONDS", "30")))
     DOWNLOAD_WATCH_SECONDS = max(300, int(os.getenv("DOWNLOAD_WATCH_SECONDS", "86400")))
+    ABS_REPORT_CHANNEL_ID = int(ABS_REPORT_CHANNEL_ID_VALUE) if ABS_REPORT_CHANNEL_ID_VALUE else None
 except ValueError as exc:
     raise RuntimeError(
-        "PORT, DOWNLOAD_POLL_SECONDS, and DOWNLOAD_WATCH_SECONDS must be valid integers"
+        "PORT, DOWNLOAD_POLL_SECONDS, DOWNLOAD_WATCH_SECONDS, and ABS_REPORT_CHANNEL_ID "
+        "must be valid integers"
     ) from exc
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
@@ -913,6 +916,75 @@ class BookSelectView(discord.ui.View):
         self.add_item(BookSelect(results))
 
 
+class ABSReportModal(discord.ui.Modal, title="Audiobook Issue Report"):
+    audiobook_title = discord.ui.TextInput(
+        label="Audiobook Title",
+        placeholder="Enter the audiobook title",
+        max_length=200,
+    )
+    audiobook_author = discord.ui.TextInput(
+        label="Audiobook Author",
+        placeholder="Enter the author's name",
+        max_length=200,
+    )
+    issue = discord.ui.TextInput(
+        label="Issue",
+        placeholder="Describe the playback, metadata, or file issue",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        audiobook_title = str(self.audiobook_title).strip()
+        audiobook_author = str(self.audiobook_author).strip()
+        issue = str(self.issue).strip()
+        if not audiobook_title or not audiobook_author or not issue:
+            await interaction.followup.send(
+                "❌ Audiobook Title, Audiobook Author, and Issue are required.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            channel = bot.get_channel(ABS_REPORT_CHANNEL_ID)
+            if channel is None:
+                channel = await bot.fetch_channel(ABS_REPORT_CHANNEL_ID)
+            if not hasattr(channel, "send"):
+                await interaction.followup.send(
+                    "❌ The configured report destination is not a message channel.",
+                    ephemeral=True,
+                )
+                return
+
+            report = discord.Embed(
+                title="🎧 Audiobook Issue Report",
+                color=discord.Color.from_rgb(99, 102, 241),
+                timestamp=discord.utils.utcnow(),
+            )
+            report.add_field(name="Audiobook Title", value=audiobook_title, inline=False)
+            report.add_field(name="Audiobook Author", value=audiobook_author, inline=False)
+            report.add_field(name="Issue", value=issue, inline=False)
+            report.set_footer(
+                text=f"Submitted by {interaction.user} • User ID {interaction.user.id}",
+                icon_url=interaction.user.display_avatar.url,
+            )
+            await channel.send(
+                embed=report,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await interaction.followup.send(
+                "✅ Your audiobook issue report was submitted.",
+                ephemeral=True,
+            )
+        except discord.DiscordException:
+            logger.exception("Failed to deliver audiobook issue report to channel %s", ABS_REPORT_CHANNEL_ID)
+            await interaction.followup.send(
+                "❌ I could not deliver the report. Check the report channel and bot permissions.",
+                ephemeral=True,
+            )
+
+
 async def health_check(_request):
     return web.json_response({"status": "ok"})
 
@@ -994,6 +1066,17 @@ async def on_disconnect():
 @bot.event
 async def on_resumed():
     logger.info("Discord gateway session resumed")
+
+
+@bot.tree.command(name="absreport", description="Report an issue with an audiobook")
+async def slash_absreport(interaction: discord.Interaction):
+    if ABS_REPORT_CHANNEL_ID is None:
+        await interaction.response.send_message(
+            "❌ Audiobook reporting is not configured. Set `ABS_REPORT_CHANNEL_ID`.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_modal(ABSReportModal())
 
 
 @bot.tree.command(name="request", description="Search for an audiobook by title, author, or both")
