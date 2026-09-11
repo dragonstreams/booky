@@ -90,6 +90,6 @@ The `/request` command accepts three options:
 
 Users can provide either title or author, or both. When both are supplied, Booky2.0 searches the combined phrase and each individual field, merges duplicate results, and ranks books that match both values first.
 
-For a collection request, select any matching book in the intended series. Booky2.0 reads its series metadata, finds the other books, and starts an individual Bookshelf/Prowlarr request for each one without per-book confirmation. Progress and completion notices are posted in the request channel.
+For a collection request, users can select one or multiple titles. A single selection starts immediately. Multiple selections display a summary with **Confirm selections** and **Other options** buttons; searches begin only after confirmation. Selected titles from the same series are grouped into one collection request. Booky2.0 adds a representative book, loads Readarr's authoritative series catalog, merges remote matches, and starts an individual Bookshelf/Prowlarr request for every unique book. Progress and completion notices are posted in the request channel.
 
 The `/absreport` command opens a private form with Audiobook Title, Audiobook Author, and Issue fields. The Issue field accepts up to 1,000 characters. Submitted reports are posted publicly in `ABS_REPORT_CHANNEL_ID`, while the submitter receives a private confirmation. Enable Discord Developer Mode to copy the destination channel ID, and give the bot View Channel, Send Messages, and Embed Links permissions there.

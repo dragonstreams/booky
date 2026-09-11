@@ -334,6 +334,26 @@ def build_selection_embed(book):
     return embed
 
 
+def build_collection_confirmation_embed(books):
+    lines = []
+    for book in books:
+        title = discord.utils.escape_markdown(
+            discord.utils.escape_mentions(str(book.get("title") or "Unknown Book")[:70])
+        )
+        collection = discord.utils.escape_markdown(
+            discord.utils.escape_mentions((get_collection_name(book) or "No series metadata")[:70])
+        )
+        lines.append(f"• **{title}** — {collection}")
+
+    embed = discord.Embed(
+        title=f"📚 Confirm {len(books)} selected titles",
+        description="\n".join(lines),
+        color=discord.Color.from_rgb(99, 102, 241),
+    )
+    embed.set_footer(text="Confirm to start each selected collection search.")
+    return embed
+
+
 def audio_edition_score(book):
     """Prefer structured audio metadata over incidental description matches."""
     best_score = 0
@@ -729,8 +749,19 @@ class BookSelect(discord.ui.Select):
         selected_indices = [int(value) for value in self.values]
         if self.collection_requested:
             selected_books = [self.results[index] for index in selected_indices]
-            await interaction.response.defer()
-            await start_collection_requests(interaction, selected_books)
+            if len(selected_books) > 1:
+                await interaction.response.edit_message(
+                    content="Review the selected collection titles before starting:",
+                    embed=build_collection_confirmation_embed(selected_books),
+                    view=ConfirmCollectionSelectionView(
+                        self,
+                        selected_indices,
+                        interaction.user.id,
+                    ),
+                )
+            else:
+                await interaction.response.defer()
+                await start_collection_requests(interaction, selected_books)
             return
 
         selected_index = selected_indices[0]
@@ -1086,32 +1117,103 @@ async def process_collection(channel, user, collection_name, selected_book):
     )
 
 
-async def start_collection_request(interaction, selected_book):
-    collection_name = get_collection_name(selected_book)
-    if not collection_name:
+async def process_collection_requests(channel, user, collection_requests):
+    for collection_name, selected_book in collection_requests:
+        await process_collection(channel, user, collection_name, selected_book)
+
+
+async def start_collection_requests(interaction, selected_books):
+    collection_requests = {}
+    missing_metadata = []
+    for book in selected_books:
+        collection_name = get_collection_name(book)
+        if not collection_name:
+            missing_metadata.append(str(book.get("title") or "Unknown Book"))
+            continue
+        collection_requests.setdefault(normalize(collection_name), (collection_name, book))
+
+    if not collection_requests:
         await interaction.edit_original_response(
-            content="❌ The selected book does not include collection or series metadata.",
+            content="❌ The selected titles do not include collection or series metadata.",
             embed=None,
             view=None,
         )
         return
 
-    safe_collection = discord.utils.escape_markdown(
-        discord.utils.escape_mentions(collection_name[:200])
+    collection_names = [item[0] for item in collection_requests.values()]
+    safe_names = ", ".join(
+        discord.utils.escape_markdown(discord.utils.escape_mentions(name[:100]))
+        for name in collection_names
+    )
+    skipped_text = (
+        f" {len(missing_metadata)} selected title(s) without series metadata will be skipped."
+        if missing_metadata
+        else ""
     )
     await interaction.edit_original_response(
         content=(
-            f"📚 Preparing **{safe_collection}**. The selected book will be added first so "
-            "Bookshelf can load the complete series catalog."
+            f"📚 Preparing **{len(collection_requests)}** collection request(s): {safe_names}. "
+            f"Each selected collection will start after its catalog is loaded.{skipped_text}"
         ),
         embed=None,
         view=None,
     )
     task = asyncio.create_task(
-        process_collection(interaction.channel, interaction.user, collection_name, selected_book)
+        process_collection_requests(
+            interaction.channel,
+            interaction.user,
+            list(collection_requests.values()),
+        )
     )
     _download_watch_tasks.add(task)
     task.add_done_callback(_download_watch_tasks.discard)
+
+
+class ConfirmCollectionSelectionView(discord.ui.View):
+    def __init__(self, book_select, selected_indices, user_id):
+        super().__init__(timeout=120)
+        self.book_select = book_select
+        self.selected_indices = selected_indices
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who selected these titles can use these controls.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Confirm selections",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+    )
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.defer()
+        self.stop()
+        selected_books = [
+            self.book_select.results[index]
+            for index in self.selected_indices
+        ]
+        await start_collection_requests(interaction, selected_books)
+
+    @discord.ui.button(
+        label="Other options",
+        style=discord.ButtonStyle.secondary,
+        emoji="↩️",
+    )
+    async def other_options(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(
+            content="Choose one or more collection titles:",
+            embed=None,
+            view=BookSelectView(
+                self.book_select.results,
+                collection_requested=True,
+            ),
+        )
 
 
 class ConfirmSelectionView(discord.ui.View):
