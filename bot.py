@@ -716,23 +716,25 @@ class BookSelect(discord.ui.Select):
 
         super().__init__(
             placeholder=(
-                "Choose a book from the collection..."
+                "Choose one or more collection titles..."
                 if collection_requested
                 else "Choose the exact audiobook edition..."
             ),
             min_values=1,
-            max_values=1,
+            max_values=len(options) if collection_requested else 1,
             options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        selected_index = int(self.values[0])
-        book = self.results[selected_index]
+        selected_indices = [int(value) for value in self.values]
         if self.collection_requested:
+            selected_books = [self.results[index] for index in selected_indices]
             await interaction.response.defer()
-            await start_collection_request(interaction, book)
+            await start_collection_requests(interaction, selected_books)
             return
 
+        selected_index = selected_indices[0]
+        book = self.results[selected_index]
         await interaction.response.edit_message(
             content="Please review your selection before starting the search:",
             embed=build_selection_embed(book),
