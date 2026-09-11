@@ -253,6 +253,29 @@ def no_results_message(title):
     return f"No Results Found for **{safe_title}**."
 
 
+def get_collection_name(book):
+    series_title = str(book.get("seriesTitle") or "").split(";", 1)[0].strip()
+    if series_title:
+        return re.sub(r"\s+#\s*\d+(?:\.\d+)?\s*$", "", series_title).strip()
+
+    for series in book.get("series") or []:
+        name = str(series.get("title") or series.get("name") or "").strip()
+        if name:
+            return name
+    for link in book.get("seriesLinks") or []:
+        series = link.get("series") or {}
+        name = str(series.get("title") or series.get("name") or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def collection_position(book):
+    series_title = str(book.get("seriesTitle") or "")
+    match = re.search(r"#\s*(\d+(?:\.\d+)?)", series_title)
+    return float(match.group(1)) if match else float("inf")
+
+
 def sanitize(obj):
     """Replace null collection fields with empty lists for Readarr schema validation."""
     if not isinstance(obj, dict):
@@ -610,6 +633,22 @@ def schedule_download_monitor(interaction, book_id, title, author_name):
 
 async def track_search_and_notify(interaction, book_id, title, author_name):
     """Trigger BookSearch and use targeted, bounded polling to detect a new grab."""
+    if getattr(interaction, "collection_mode", False):
+        status, _, response_text = await api.post(
+            "/api/v1/command",
+            payload={"name": "BookSearch", "bookIds": [book_id]},
+        )
+        if status in (200, 201):
+            schedule_download_monitor(interaction, book_id, title, author_name)
+            await interaction.edit_original_response(
+                content=f"🔎 Started an individual Prowlarr search for **{title}** by *{author_name}*."
+            )
+        else:
+            await interaction.edit_original_response(
+                content=f"⚠️ Could not start the search for **{title}**: `{response_text[:160]}`"
+            )
+        return
+
     previous_grab_ids = await get_recent_grab_ids(book_id)
     status, command, _ = await api.post(
         "/api/v1/command",
@@ -655,14 +694,17 @@ async def track_search_and_notify(interaction, book_id, title, author_name):
 
 
 class BookSelect(discord.ui.Select):
-    def __init__(self, results):
+    def __init__(self, results, collection_requested=False):
         self.results = results[:25]
+        self.collection_requested = collection_requested
         options = []
         for index, book in enumerate(self.results):
             title = book.get("title", "Unknown Title")[:80]
             author_name = get_author_name(book)
             year = str(book.get("publishDate") or "")[:4]
-            tag = "🎧 [Audio]" if is_audio_edition(book) else "📖 [Book]"
+            tag = "📚 [Collection]" if collection_requested else (
+                "🎧 [Audio]" if is_audio_edition(book) else "📖 [Book]"
+            )
             description = f"{tag} By {author_name} ({year})" if year else f"{tag} By {author_name}"
             options.append(
                 discord.SelectOption(
@@ -673,7 +715,11 @@ class BookSelect(discord.ui.Select):
             )
 
         super().__init__(
-            placeholder="Choose the exact audiobook edition...",
+            placeholder=(
+                "Choose a book from the collection..."
+                if collection_requested
+                else "Choose the exact audiobook edition..."
+            ),
             min_values=1,
             max_values=1,
             options=options,
@@ -682,6 +728,11 @@ class BookSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         selected_index = int(self.values[0])
         book = self.results[selected_index]
+        if self.collection_requested:
+            await interaction.response.defer()
+            await start_collection_request(interaction, book)
+            return
+
         await interaction.response.edit_message(
             content="Please review your selection before starting the search:",
             embed=build_selection_embed(book),
@@ -854,6 +905,130 @@ class BookSelect(discord.ui.Select):
             )
 
 
+class CollectionInteractionProxy:
+    collection_mode = True
+
+    def __init__(self, channel, user):
+        self.channel = channel
+        self.channel_id = channel.id
+        self.user = user
+
+    async def edit_original_response(self, *, content=None, **_kwargs):
+        if content:
+            await self.channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+
+async def find_collection_books(selected_book, collection_name):
+    status, results, response_text = await api.get(
+        "/api/v1/book/lookup",
+        params={"term": collection_name},
+    )
+    if status != 200 or not isinstance(results, list):
+        raise BookshelfError(
+            f"Collection lookup failed with HTTP {status}: {response_text[:160]}"
+        )
+
+    normalized_collection = normalize(collection_name)
+    matching_books = [
+        book
+        for book in [selected_book, *results]
+        if normalize(get_collection_name(book)) == normalized_collection
+    ]
+    unique_books = []
+    seen = set()
+    for book in matching_books:
+        key = str(book.get("foreignBookId") or "") or (
+            normalize(book.get("title")),
+            normalize(get_author_name(book)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_books.append(book)
+
+    unique_books.sort(
+        key=lambda book: (
+            collection_position(book),
+            str(book.get("publishDate") or ""),
+            normalize(book.get("title")),
+        )
+    )
+    return unique_books
+
+
+async def process_collection(channel, user, collection_name, books):
+    proxy = CollectionInteractionProxy(channel, user)
+    processed = 0
+    for book in books:
+        try:
+            await BookSelect([book]).handle_selection(proxy, 0)
+            processed += 1
+        except BookshelfError:
+            logger.exception("Bookshelf operation failed for collection book %r", book.get("title"))
+            await proxy.edit_original_response(
+                content=f"❌ Could not process **{book.get('title', 'Unknown Book')}**. Check the bot logs."
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.exception("Unexpected response while processing collection book %r", book.get("title"))
+            await proxy.edit_original_response(
+                content=f"❌ Bookshelf returned an unexpected response for **{book.get('title', 'Unknown Book')}**."
+            )
+
+    safe_collection = discord.utils.escape_markdown(
+        discord.utils.escape_mentions(collection_name[:200])
+    )
+    await channel.send(
+        f"✅ Collection **{safe_collection}** processed: {processed} individual book request(s) submitted.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def start_collection_request(interaction, selected_book):
+    collection_name = get_collection_name(selected_book)
+    if not collection_name:
+        await interaction.edit_original_response(
+            content="❌ The selected book does not include collection or series metadata.",
+            embed=None,
+            view=None,
+        )
+        return
+
+    try:
+        books = await find_collection_books(selected_book, collection_name)
+    except BookshelfError as exc:
+        logger.exception("Collection lookup failed for %r", collection_name)
+        await interaction.edit_original_response(content=f"❌ {exc}", embed=None, view=None)
+        return
+
+    if not books:
+        await interaction.edit_original_response(
+            content=no_results_message(collection_name),
+            embed=None,
+            view=None,
+        )
+        return
+
+    safe_collection = discord.utils.escape_markdown(
+        discord.utils.escape_mentions(collection_name[:200])
+    )
+    await interaction.edit_original_response(
+        content=(
+            f"📚 Starting **{len(books)}** individual book request(s) from "
+            f"**{safe_collection}**. Progress will be posted in this channel."
+        ),
+        embed=None,
+        view=None,
+    )
+    task = asyncio.create_task(
+        process_collection(interaction.channel, interaction.user, collection_name, books)
+    )
+    _download_watch_tasks.add(task)
+    task.add_done_callback(_download_watch_tasks.discard)
+
+
 class ConfirmSelectionView(discord.ui.View):
     def __init__(self, book_select, selected_index, user_id):
         super().__init__(timeout=120)
@@ -911,9 +1086,9 @@ class ConfirmSelectionView(discord.ui.View):
 
 
 class BookSelectView(discord.ui.View):
-    def __init__(self, results):
+    def __init__(self, results, collection_requested=False):
         super().__init__(timeout=120)
-        self.add_item(BookSelect(results))
+        self.add_item(BookSelect(results, collection_requested=collection_requested))
 
 
 class ABSReportModal(discord.ui.Modal, title="Audiobook Issue Report"):
@@ -1083,11 +1258,13 @@ async def slash_absreport(interaction: discord.Interaction):
 @app_commands.describe(
     title="Audiobook title (optional when author is provided)",
     author="Author name (optional when title is provided)",
+    collection="Yes: request every book in the selected series",
 )
 async def slash_request(
     interaction: discord.Interaction,
     title: str | None = None,
     author: str | None = None,
+    collection: bool = False,
 ):
     title = (title or "").strip()
     author = (author or "").strip()
@@ -1191,9 +1368,14 @@ async def slash_request(
         safe_search_label = discord.utils.escape_markdown(
             discord.utils.escape_mentions(search_label[:200])
         )
+        selection_prompt = (
+            "Select any book from the collection to request the full series:"
+            if collection
+            else "Select below:"
+        )
         await interaction.followup.send(
-            f"🎧 Found {len(final_results)} match(es) for **{safe_search_label}**. Select below:",
-            view=BookSelectView(final_results),
+            f"🎧 Found {len(final_results)} match(es) for **{safe_search_label}**. {selection_prompt}",
+            view=BookSelectView(final_results, collection_requested=collection),
         )
     except BookshelfError:
         logger.exception("Book lookup failed")
