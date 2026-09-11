@@ -922,24 +922,100 @@ class CollectionInteractionProxy:
 
 
 async def find_collection_books(selected_book, collection_name):
-    status, results, response_text = await api.get(
-        "/api/v1/book/lookup",
-        params={"term": collection_name},
-    )
-    if status != 200 or not isinstance(results, list):
-        raise BookshelfError(
-            f"Collection lookup failed with HTTP {status}: {response_text[:160]}"
-        )
-
     normalized_collection = normalize(collection_name)
-    matching_books = [
-        book
-        for book in [selected_book, *results]
-        if normalize(get_collection_name(book)) == normalized_collection
-    ]
+    candidates = [selected_book]
+
+    try:
+        status, results, response_text = await api.get(
+            "/api/v1/book/lookup",
+            params={"term": collection_name},
+        )
+        if status == 200 and isinstance(results, list):
+            candidates.extend(
+                book
+                for book in results
+                if normalize(get_collection_name(book)) == normalized_collection
+            )
+        else:
+            logger.warning(
+                "Remote collection lookup for %r returned HTTP %s: %s",
+                collection_name,
+                status,
+                response_text[:160],
+            )
+    except BookshelfError:
+        logger.exception("Remote collection lookup failed for %r", collection_name)
+
+    selected_foreign_id = str(selected_book.get("foreignBookId") or "")
+    for delay in (0, 2, 5):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            books_status, library_books, _ = await api.get("/api/v1/book")
+            if books_status != 200 or not isinstance(library_books, list):
+                continue
+
+            library_selected = next(
+                (
+                    book
+                    for book in library_books
+                    if selected_foreign_id
+                    and str(book.get("foreignBookId") or "") == selected_foreign_id
+                ),
+                None,
+            )
+            if library_selected is None:
+                library_selected = next(
+                    (
+                        book
+                        for book in library_books
+                        if normalize(book.get("title")) == normalize(selected_book.get("title"))
+                        and normalize(get_author_name(book)) == normalize(get_author_name(selected_book))
+                    ),
+                    None,
+                )
+            if not library_selected or not library_selected.get("authorId"):
+                continue
+
+            series_status, series_list, _ = await api.get(
+                "/api/v1/series",
+                params={"authorId": library_selected["authorId"]},
+            )
+            if series_status != 200 or not isinstance(series_list, list):
+                continue
+
+            series = next(
+                (
+                    item
+                    for item in series_list
+                    if normalize(item.get("title")) == normalized_collection
+                ),
+                None,
+            )
+            if not series:
+                continue
+
+            linked_book_ids = {
+                link.get("bookId")
+                for link in series.get("links") or []
+                if link.get("bookId") is not None
+            }
+            candidates.extend(
+                book for book in library_books if book.get("id") in linked_book_ids
+            )
+            if linked_book_ids:
+                logger.info(
+                    "Readarr series catalog returned %d linked books for %r",
+                    len(linked_book_ids),
+                    collection_name,
+                )
+                break
+        except BookshelfError:
+            logger.exception("Readarr series lookup failed for %r", collection_name)
+
     unique_books = []
     seen = set()
-    for book in matching_books:
+    for book in candidates:
         key = str(book.get("foreignBookId") or "") or (
             normalize(book.get("title")),
             normalize(get_author_name(book)),
@@ -959,10 +1035,35 @@ async def find_collection_books(selected_book, collection_name):
     return unique_books
 
 
-async def process_collection(channel, user, collection_name, books):
+async def process_collection(channel, user, collection_name, selected_book):
     proxy = CollectionInteractionProxy(channel, user)
     processed = 0
+    selected_key = str(selected_book.get("foreignBookId") or "")
+
+    try:
+        await BookSelect([selected_book]).handle_selection(proxy, 0)
+        processed += 1
+    except (BookshelfError, KeyError, TypeError, ValueError):
+        logger.exception("Could not process the selected collection book %r", selected_book.get("title"))
+        await proxy.edit_original_response(
+            content=f"❌ Could not process **{selected_book.get('title', 'Unknown Book')}**. Check the bot logs."
+        )
+
+    books = await find_collection_books(selected_book, collection_name)
+    safe_collection = discord.utils.escape_markdown(
+        discord.utils.escape_mentions(collection_name[:200])
+    )
+    await channel.send(
+        f"📚 Found **{len(books)}** book(s) in **{safe_collection}**. Starting the remaining individual searches.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
     for book in books:
+        book_key = str(book.get("foreignBookId") or "")
+        if selected_key and book_key == selected_key:
+            continue
+        if not selected_key and normalize(book.get("title")) == normalize(selected_book.get("title")):
+            continue
         try:
             await BookSelect([book]).handle_selection(proxy, 0)
             processed += 1
@@ -977,9 +1078,6 @@ async def process_collection(channel, user, collection_name, books):
                 content=f"❌ Bookshelf returned an unexpected response for **{book.get('title', 'Unknown Book')}**."
             )
 
-    safe_collection = discord.utils.escape_markdown(
-        discord.utils.escape_mentions(collection_name[:200])
-    )
     await channel.send(
         f"✅ Collection **{safe_collection}** processed: {processed} individual book request(s) submitted.",
         allowed_mentions=discord.AllowedMentions.none(),
@@ -996,34 +1094,19 @@ async def start_collection_request(interaction, selected_book):
         )
         return
 
-    try:
-        books = await find_collection_books(selected_book, collection_name)
-    except BookshelfError as exc:
-        logger.exception("Collection lookup failed for %r", collection_name)
-        await interaction.edit_original_response(content=f"❌ {exc}", embed=None, view=None)
-        return
-
-    if not books:
-        await interaction.edit_original_response(
-            content=no_results_message(collection_name),
-            embed=None,
-            view=None,
-        )
-        return
-
     safe_collection = discord.utils.escape_markdown(
         discord.utils.escape_mentions(collection_name[:200])
     )
     await interaction.edit_original_response(
         content=(
-            f"📚 Starting **{len(books)}** individual book request(s) from "
-            f"**{safe_collection}**. Progress will be posted in this channel."
+            f"📚 Preparing **{safe_collection}**. The selected book will be added first so "
+            "Bookshelf can load the complete series catalog."
         ),
         embed=None,
         view=None,
     )
     task = asyncio.create_task(
-        process_collection(interaction.channel, interaction.user, collection_name, books)
+        process_collection(interaction.channel, interaction.user, collection_name, selected_book)
     )
     _download_watch_tasks.add(task)
     task.add_done_callback(_download_watch_tasks.discard)
