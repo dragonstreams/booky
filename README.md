@@ -82,13 +82,14 @@ The health service exposes no credentials or Bookshelf data.
 
 The Discord application must have a bot user installed in the target server with permission to use application commands. Booky2.0 synchronizes its slash commands during startup.
 
-The `/request` command accepts three options:
+The `/request` command accepts four options:
 
 - `title` — search by audiobook title;
 - `author` — search by author name;
+- `language` — optionally restrict results to a selected common language;
 - `collection` — choose **Yes** to request every book in the selected series.
 
-Users can provide either title or author, or both. When both are supplied, Booky2.0 searches the combined phrase and each individual field, merges duplicate results, and ranks books that match both values first.
+Users can provide either title or author, or both. When both are supplied, Booky2.0 searches the combined phrase and each individual field, merges duplicate results, and ranks books that match both values first. When a language is selected, only editions explicitly tagged with that language are shown and requested.
 
 For a collection request, users can select one or multiple titles. A single selection starts immediately. Multiple selections display a summary with **Confirm selections** and **Other options** buttons; searches begin only after confirmation. Selected titles from the same series are grouped into one collection request. Booky2.0 adds a representative book, loads Readarr's authoritative series catalog, merges remote matches, and starts an individual Bookshelf/Prowlarr request for every unique book. Progress and completion notices are posted in the request channel.
 
