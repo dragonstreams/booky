@@ -811,10 +811,9 @@ class BookSelect(discord.ui.Select):
                 )
                 return
 
-            existing_book["monitored"] = True
             update_status, _, update_text = await api.put(
-                f"/api/v1/book/{book_id}",
-                payload=existing_book,
+                "/api/v1/book/editor",
+                payload={"bookIds": [book_id], "monitored": True},
             )
             if update_status not in (200, 202):
                 raise BookshelfError(f"Unable to monitor the existing book: {update_text[:160]}")
