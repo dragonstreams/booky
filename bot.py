@@ -52,64 +52,6 @@ AUDIO_PATTERN = re.compile(
     r"\b(?:" + "|".join(re.escape(keyword) for keyword in AUDIO_KEYWORDS) + r")\b",
     re.IGNORECASE,
 )
-LANGUAGE_NAMES = {
-    "en": "English",
-    "es": "Spanish",
-    "fr": "French",
-    "de": "German",
-    "it": "Italian",
-    "pt": "Portuguese",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "sv": "Swedish",
-    "no": "Norwegian",
-    "da": "Danish",
-    "fi": "Finnish",
-    "ru": "Russian",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "zh": "Chinese",
-    "ar": "Arabic",
-    "hi": "Hindi",
-    "tr": "Turkish",
-    "cs": "Czech",
-    "el": "Greek",
-    "he": "Hebrew",
-    "hu": "Hungarian",
-    "ro": "Romanian",
-    "uk": "Ukrainian",
-}
-LANGUAGE_ALIASES = {
-    "en": "en", "eng": "en", "english": "en",
-    "es": "es", "spa": "es", "spanish": "es", "espanol": "es",
-    "fr": "fr", "fra": "fr", "fre": "fr", "french": "fr",
-    "de": "de", "deu": "de", "ger": "de", "german": "de",
-    "it": "it", "ita": "it", "italian": "it",
-    "pt": "pt", "por": "pt", "portuguese": "pt",
-    "nl": "nl", "nld": "nl", "dut": "nl", "dutch": "nl",
-    "pl": "pl", "pol": "pl", "polish": "pl",
-    "sv": "sv", "swe": "sv", "swedish": "sv",
-    "no": "no", "nor": "no", "norwegian": "no",
-    "da": "da", "dan": "da", "danish": "da",
-    "fi": "fi", "fin": "fi", "finnish": "fi",
-    "ru": "ru", "rus": "ru", "russian": "ru",
-    "ja": "ja", "jpn": "ja", "japanese": "ja",
-    "ko": "ko", "kor": "ko", "korean": "ko",
-    "zh": "zh", "zho": "zh", "chi": "zh", "chinese": "zh",
-    "ar": "ar", "ara": "ar", "arabic": "ar",
-    "hi": "hi", "hin": "hi", "hindi": "hi",
-    "tr": "tr", "tur": "tr", "turkish": "tr",
-    "cs": "cs", "ces": "cs", "cze": "cs", "czech": "cs",
-    "el": "el", "ell": "el", "gre": "el", "greek": "el",
-    "he": "he", "heb": "he", "hebrew": "he",
-    "hu": "hu", "hun": "hu", "hungarian": "hu",
-    "ro": "ro", "ron": "ro", "rum": "ro", "romanian": "ro",
-    "uk": "uk", "ukr": "uk", "ukrainian": "uk",
-}
-REQUEST_LANGUAGE_CHOICES = [
-    app_commands.Choice(name=name, value=code)
-    for code, name in LANGUAGE_NAMES.items()
-]
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -311,49 +253,6 @@ def no_results_message(title):
     return f"No Results Found for **{safe_title}**."
 
 
-def normalize_language(value):
-    return LANGUAGE_ALIASES.get(normalize(value), "")
-
-
-def filter_results_by_language(results, language_code):
-    if not language_code:
-        return results
-
-    filtered_results = []
-    for source_book in results:
-        book = copy.deepcopy(source_book)
-        editions = [
-            edition
-            for edition in book.get("editions") or []
-            if normalize_language(edition.get("language")) == language_code
-        ]
-        if not editions:
-            continue
-
-        current_edition_id = str(book.get("foreignEditionId") or "")
-        selected_edition = next(
-            (
-                edition
-                for edition in editions
-                if current_edition_id
-                and str(edition.get("foreignEditionId") or "") == current_edition_id
-            ),
-            editions[0],
-        )
-        book["editions"] = editions
-        book["foreignEditionId"] = selected_edition.get("foreignEditionId")
-        filtered_results.append(book)
-    return filtered_results
-
-
-def get_book_language(book):
-    for edition in book.get("editions") or []:
-        code = normalize_language(edition.get("language"))
-        if code:
-            return LANGUAGE_NAMES[code]
-    return ""
-
-
 def get_collection_name(book):
     series_title = str(book.get("seriesTitle") or "").split(";", 1)[0].strip()
     if series_title:
@@ -426,9 +325,6 @@ def build_selection_embed(book):
         value="🎧 Audiobook" if is_audio_edition(book) else "📖 Book",
         inline=True,
     )
-    language_name = get_book_language(book)
-    if language_name:
-        embed.add_field(name="Language", value=language_name, inline=True)
     poster_url = get_poster_url(book)
     if poster_url:
         embed.set_image(url=poster_url)
@@ -755,7 +651,7 @@ def schedule_download_monitor(interaction, book_id, title, author_name):
     task.add_done_callback(_download_watch_tasks.discard)
 
 
-async def track_search_and_notify(interaction, book_id, title, author_name, language_name=""):
+async def track_search_and_notify(interaction, book_id, title, author_name):
     """Trigger BookSearch and use targeted, bounded polling to detect a new grab."""
     if getattr(interaction, "collection_mode", False):
         status, _, response_text = await api.post(
@@ -812,33 +708,24 @@ async def track_search_and_notify(interaction, book_id, title, author_name, lang
         )
         schedule_download_monitor(interaction, book_id, title, author_name)
     else:
-        jackett_query = f"{title} {author_name} audiobook"
-        if language_name:
-            jackett_query += f" {language_name}"
-        jackett_results = await jackett.search(jackett_query)
+        jackett_results = await jackett.search(f"{title} {author_name} audiobook")
         content = format_jackett_results(jackett_results) or no_results_message(title)
     await interaction.edit_original_response(content=content)
 
 
 class BookSelect(discord.ui.Select):
-    def __init__(self, results, collection_requested=False, language_code=""):
+    def __init__(self, results, collection_requested=False):
         self.results = results[:25]
         self.collection_requested = collection_requested
-        self.language_code = language_code
         options = []
         for index, book in enumerate(self.results):
             title = book.get("title", "Unknown Title")[:80]
             author_name = get_author_name(book)
             year = str(book.get("publishDate") or "")[:4]
-            language_name = get_book_language(book)
             tag = "📚 [Collection]" if collection_requested else (
                 "🎧 [Audio]" if is_audio_edition(book) else "📖 [Book]"
             )
-            description = f"{tag} By {author_name}"
-            if year:
-                description += f" ({year})"
-            if language_name:
-                description += f" · {language_name}"
+            description = f"{tag} By {author_name} ({year})" if year else f"{tag} By {author_name}"
             options.append(
                 discord.SelectOption(
                     label=title,
@@ -874,11 +761,7 @@ class BookSelect(discord.ui.Select):
                 )
             else:
                 await interaction.response.defer()
-                await start_collection_requests(
-                    interaction,
-                    selected_books,
-                    self.language_code,
-                )
+                await start_collection_requests(interaction, selected_books)
             return
 
         selected_index = selected_indices[0]
@@ -894,7 +777,6 @@ class BookSelect(discord.ui.Select):
         title = book.get("title", "Unknown Book")
         author_obj = book.get("author") or {}
         author_name = get_author_name(book)
-        language_name = get_book_language(book)
         foreign_book_id = str(book.get("foreignBookId") or "")
         foreign_edition_id = str(book.get("foreignEditionId") or "")
 
@@ -929,10 +811,6 @@ class BookSelect(discord.ui.Select):
                 )
                 return
 
-            if foreign_edition_id:
-                existing_book["foreignEditionId"] = foreign_edition_id
-                if book.get("editions"):
-                    existing_book["editions"] = copy.deepcopy(book["editions"])
             existing_book["monitored"] = True
             update_status, _, update_text = await api.put(
                 f"/api/v1/book/{book_id}",
@@ -945,13 +823,7 @@ class BookSelect(discord.ui.Select):
                 content=f"🔎 **{title}** by *{author_name}* exists in Bookshelf but has **no file downloaded**. Searching Prowlarr/indexers...",
                 view=None,
             )
-            await track_search_and_notify(
-                interaction,
-                book_id,
-                title,
-                author_name,
-                language_name,
-            )
+            await track_search_and_notify(interaction, book_id, title, author_name)
             return
 
         target_foreign_author_id = str(author_obj.get("foreignAuthorId") or "")
@@ -1052,7 +924,6 @@ class BookSelect(discord.ui.Select):
                 created_book.get("id"),
                 title,
                 author_name,
-                language_name,
             )
         elif "already" in add_text.casefold() or "exists" in add_text.casefold():
             invalidate_library_cache()
@@ -1083,51 +954,7 @@ class CollectionInteractionProxy:
             )
 
 
-async def filter_collection_language_editions(books, language_code):
-    if not language_code:
-        return books
-
-    selected = []
-    unresolved = []
-    for book in books:
-        direct_match = filter_results_by_language([book], language_code)
-        if direct_match:
-            selected.extend(direct_match)
-        else:
-            unresolved.append(book)
-
-    if not unresolved:
-        return selected
-
-    responses = await asyncio.gather(
-        *(
-            api.get(
-                "/api/v1/book/lookup",
-                params={"term": f"{book.get('title', '')} {get_author_name(book)}"},
-            )
-            for book in unresolved
-        )
-    )
-    for source_book, (status, results, _) in zip(unresolved, responses):
-        if status != 200 or not isinstance(results, list):
-            continue
-        source_id = str(source_book.get("foreignBookId") or "")
-        matching_results = [
-            result
-            for result in results
-            if (source_id and str(result.get("foreignBookId") or "") == source_id)
-            or (
-                normalize(result.get("title")) == normalize(source_book.get("title"))
-                and normalize(get_author_name(result)) == normalize(get_author_name(source_book))
-            )
-        ]
-        language_matches = filter_results_by_language(matching_results, language_code)
-        if language_matches:
-            selected.append(language_matches[0])
-    return selected
-
-
-async def find_collection_books(selected_book, collection_name, language_code=""):
+async def find_collection_books(selected_book, collection_name):
     normalized_collection = normalize(collection_name)
     candidates = [selected_book]
 
@@ -1231,7 +1058,6 @@ async def find_collection_books(selected_book, collection_name, language_code=""
         seen.add(key)
         unique_books.append(book)
 
-    unique_books = await filter_collection_language_editions(unique_books, language_code)
     unique_books.sort(
         key=lambda book: (
             collection_position(book),
@@ -1242,13 +1068,13 @@ async def find_collection_books(selected_book, collection_name, language_code=""
     return unique_books
 
 
-async def process_collection(channel, user, collection_name, selected_book, language_code=""):
+async def process_collection(channel, user, collection_name, selected_book):
     proxy = CollectionInteractionProxy(channel, user)
     processed = 0
     selected_key = str(selected_book.get("foreignBookId") or "")
 
     try:
-        await BookSelect([selected_book], language_code=language_code).handle_selection(proxy, 0)
+        await BookSelect([selected_book]).handle_selection(proxy, 0)
         processed += 1
     except (BookshelfError, KeyError, TypeError, ValueError):
         logger.exception("Could not process the selected collection book %r", selected_book.get("title"))
@@ -1256,7 +1082,7 @@ async def process_collection(channel, user, collection_name, selected_book, lang
             content=f"❌ Could not process **{selected_book.get('title', 'Unknown Book')}**. Check the bot logs."
         )
 
-    books = await find_collection_books(selected_book, collection_name, language_code)
+    books = await find_collection_books(selected_book, collection_name)
     safe_collection = discord.utils.escape_markdown(
         discord.utils.escape_mentions(collection_name[:200])
     )
@@ -1272,7 +1098,7 @@ async def process_collection(channel, user, collection_name, selected_book, lang
         if not selected_key and normalize(book.get("title")) == normalize(selected_book.get("title")):
             continue
         try:
-            await BookSelect([book], language_code=language_code).handle_selection(proxy, 0)
+            await BookSelect([book]).handle_selection(proxy, 0)
             processed += 1
         except BookshelfError:
             logger.exception("Bookshelf operation failed for collection book %r", book.get("title"))
@@ -1291,18 +1117,12 @@ async def process_collection(channel, user, collection_name, selected_book, lang
     )
 
 
-async def process_collection_requests(channel, user, collection_requests, language_code=""):
+async def process_collection_requests(channel, user, collection_requests):
     for collection_name, selected_book in collection_requests:
-        await process_collection(
-            channel,
-            user,
-            collection_name,
-            selected_book,
-            language_code,
-        )
+        await process_collection(channel, user, collection_name, selected_book)
 
 
-async def start_collection_requests(interaction, selected_books, language_code=""):
+async def start_collection_requests(interaction, selected_books):
     collection_requests = {}
     missing_metadata = []
     for book in selected_books:
@@ -1343,7 +1163,6 @@ async def start_collection_requests(interaction, selected_books, language_code="
             interaction.channel,
             interaction.user,
             list(collection_requests.values()),
-            language_code,
         )
     )
     _download_watch_tasks.add(task)
@@ -1378,11 +1197,7 @@ class ConfirmCollectionSelectionView(discord.ui.View):
             self.book_select.results[index]
             for index in self.selected_indices
         ]
-        await start_collection_requests(
-            interaction,
-            selected_books,
-            self.book_select.language_code,
-        )
+        await start_collection_requests(interaction, selected_books)
 
     @discord.ui.button(
         label="Other options",
@@ -1397,7 +1212,6 @@ class ConfirmCollectionSelectionView(discord.ui.View):
             view=BookSelectView(
                 self.book_select.results,
                 collection_requested=True,
-                language_code=self.book_select.language_code,
             ),
         )
 
@@ -1459,15 +1273,9 @@ class ConfirmSelectionView(discord.ui.View):
 
 
 class BookSelectView(discord.ui.View):
-    def __init__(self, results, collection_requested=False, language_code=""):
+    def __init__(self, results, collection_requested=False):
         super().__init__(timeout=120)
-        self.add_item(
-            BookSelect(
-                results,
-                collection_requested=collection_requested,
-                language_code=language_code,
-            )
-        )
+        self.add_item(BookSelect(results, collection_requested=collection_requested))
 
 
 class ABSReportModal(discord.ui.Modal, title="Audiobook Issue Report"):
@@ -1637,21 +1445,16 @@ async def slash_absreport(interaction: discord.Interaction):
 @app_commands.describe(
     title="Audiobook title (optional when author is provided)",
     author="Author name (optional when title is provided)",
-    language="Only show audiobook editions in this language",
     collection="Yes: request every book in the selected series",
 )
-@app_commands.choices(language=REQUEST_LANGUAGE_CHOICES)
 async def slash_request(
     interaction: discord.Interaction,
     title: str | None = None,
     author: str | None = None,
-    language: app_commands.Choice[str] | None = None,
     collection: bool = False,
 ):
     title = (title or "").strip()
     author = (author or "").strip()
-    language_code = language.value if language else ""
-    language_name = language.name if language else ""
     if not title and not author:
         await interaction.response.send_message(
             "Please enter a title, an author, or both.",
@@ -1661,8 +1464,6 @@ async def slash_request(
 
     await interaction.response.defer()
     search_label = f"{title} by {author}" if title and author else title or f"Author: {author}"
-    if language_name:
-        search_label += f" ({language_name})"
     search_terms = []
     if title and author:
         search_terms.append(f"{title} {author}")
@@ -1724,9 +1525,6 @@ async def slash_request(
             valid_response_seen = True
             raw_results.extend(results)
 
-        if raw_results and language_code:
-            raw_results = filter_results_by_language(raw_results, language_code)
-
         if not raw_results:
             if valid_response_seen or (not first_http_error and not unexpected_response):
                 logger.info("Lookup for %r returned no metadata matches in %.2fs", search_label, elapsed)
@@ -1758,17 +1556,13 @@ async def slash_request(
             discord.utils.escape_mentions(search_label[:200])
         )
         selection_prompt = (
-            "Select one or more books representing the collection(s) to request:"
+            "Select any book from the collection to request the full series:"
             if collection
             else "Select below:"
         )
         await interaction.followup.send(
             f"🎧 Found {len(final_results)} match(es) for **{safe_search_label}**. {selection_prompt}",
-            view=BookSelectView(
-                final_results,
-                collection_requested=collection,
-                language_code=language_code,
-            ),
+            view=BookSelectView(final_results, collection_requested=collection),
         )
     except BookshelfError:
         logger.exception("Book lookup failed")
